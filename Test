@@ -1,1181 +1,207 @@
-do
+--[[ services ]]
 
-local feErrorSignal = nil
-local feSuspectName = nil
-local feACScript = nil
-local feOldNamecall = nil
-
-pcall(function()
-    local bypassed = false
-
-    local kKickNames = { "Kick", "kick" }
-
-    local kProtectedProperties = {
-        Enabled = true,
-        Disabled = false
-    }
-
-    local kSlotMap = {
-        [69]  = 2,
-        [138] = 3,
-        [207] = 4,
-        [276] = 5,
-        [345] = 6,
-        [414] = 7,
-    }
-
-    local kFilledSub = { 1, 2, 3, 4, 5 }
-
-    local FE_PATTERNS = { "exploit", "cheat", "detect", "ban", "flag", "validate", "integrity", "security", "anticheat", "ac_" }
-    feSuspectName = function(name)
-        if type(name) ~= "string" then return false end
-        local lower = name:lower()
-        for _, pat in ipairs(FE_PATTERNS) do
-            if lower:find(pat, 1, true) then return true end
-        end
-        return false
-    end
-
-    local Players = cloneref and cloneref(game:GetService("Players")) or game:GetService("Players")
-    local ReplicatedFirst = cloneref and cloneref(game:GetService("ReplicatedFirst")) or game:GetService("ReplicatedFirst")
-    local ReplicatedStorage = cloneref and cloneref(game:GetService("ReplicatedStorage")) or game:GetService("ReplicatedStorage")
-    local ScriptContext = cloneref and cloneref(game:GetService("ScriptContext")) or game:GetService("ScriptContext")
-
-    local LocalPlayer = Players.LocalPlayer
-    feErrorSignal = ScriptContext.Error
-
-    local ac_script = ReplicatedFirst:FindFirstChild("LocalScript3")
-    if not ac_script and not game:IsLoaded() then
-        ac_script = ReplicatedFirst:WaitForChild("LocalScript3", 8)
-    end
-    local remotes_folder = ReplicatedStorage:FindFirstChild("Remotes") or ReplicatedStorage:WaitForChild("Remotes", 3)
-    local ac_event = nil
-    if remotes_folder then
-        ac_event = remotes_folder:FindFirstChild("RemoteEvent") or remotes_folder:WaitForChild("RemoteEvent", 3)
-    end
-    feACScript = ac_script
-
-    local last = nil
-    local first_seen = false
-    local hijack_ready = false
-    local client_id
-    local expected_interval = 0.6
-    local min_interval = 0.25
-    local ema_alpha = 0.5
-    local samples = 0
-    local hidden_fn = {}
-    local _setstackhidden = setstackhidden or function(fn_or_level, hidden)
-        assert(typeof(hidden) == "boolean", "hidden must be boolean")
-
-        local ok, fn = pcall(function()
-            if typeof(fn_or_level) == "number" then
-                return debug.info(fn_or_level + 2, "f")
-            end
-            return fn_or_level
-        end)
-
-        assert(ok and fn, "invalid argument #1 to 'setstackhidden'")
-        hidden_fn[fn] = not hidden
-    end
-
-    local TrustedFunctions = setmetatable({}, {
-        __mode = "k"
-    })
-
-    local function TrustFunction(fn)
-        if type(fn) == "function" then
-            TrustedFunctions[fn] = true
-        end
-
-        return fn
-    end
-
-    local function IsTrustedFunction(fn)
-        return TrustedFunctions[fn] == true
-    end
-
-    local SafeHook = function(hookfn, ...)
-        local args = {...}
-        local func, inst, metamethod, detour
-
-        if hookfn == hookmetamethod then
-            inst = args[1]
-            metamethod = args[2]
-            detour = args[3]
-        else
-            func = args[1]
-            detour = args[2]
-        end
-
-        local original_func
-
-        if hookfn == hookfunction and iscclosure and iscclosure(func) then
-            detour = newcclosure(detour)
-        end
-
-        if not iscclosure(detour) then
-            detour = newcclosure(detour)
-        end
-
-        _setstackhidden(detour, true)
-
-        local ok, _ = pcall(function()
-            TrustFunction(detour)
-
-            if hookfn == hookmetamethod then
-                original_func = hookfn(inst, metamethod, detour)
-            else
-                original_func = hookfn(func, detour)
-            end
-        end)
-
-        if not ok then
-            print("[Fallen] protection hook unavailable - partial arm mode")
-        end
-
-        return original_func
-    end
-
-    local SafeCall = function(func, ...)
-        if checkcaller() or type(getthreadidentity) ~= "function" or type(setthreadidentity) ~= "function" then
-            return func(...)
-        end
-
-        local old = getthreadidentity()
-        if old ~= 2 then
-            setthreadidentity(2)
-        end
-
-        local result = {func(...)}
-
-        if old ~= 2 then
-            setthreadidentity(old)
-        end
-
-        return table.unpack(result)
-    end
-
-    local oldindex
-    if ac_script then
-        oldindex = SafeHook(hookmetamethod, ac_script, "__index", function(t, k)
-        local is_caller = not bypassed and checkcaller()
-        if t == ac_script and not is_caller and kProtectedProperties[k] ~= nil then
-            return kProtectedProperties[k]
-        end
-        if checkcaller() then
-            return oldindex(t, k)
-        end
-        return SafeCall(oldindex, t, k)
-        end)
-    end
-
-    local oldnewindex
-    if ac_script then
-        oldnewindex = SafeHook(hookmetamethod, ac_script, "__newindex", function(t, k, v)
-        local is_caller = not bypassed and checkcaller()
-        if t == ac_script and not is_caller and kProtectedProperties[k] ~= nil then
-            kProtectedProperties[k] = v
-            if k == "Enabled" then
-                kProtectedProperties["Disabled"] = not v
-            end
-
-            if k == "Disabled" then
-                kProtectedProperties["Enabled"] = not v
-            end
-            return
-        end
-        if checkcaller() then
-            return oldnewindex(t, k, v)
-        end
-        return SafeCall(oldnewindex, t, k, v)
-        end)
-    end
-
-    client_id = ""
-    last = tick()
-
-    local oldfireserver
-    if ac_event then
-        oldfireserver = SafeHook(hookfunction, ac_event.FireServer, function(self, ...)
-        local now = tick()
-        local args = {...}
-
-        if not first_seen then
-            first_seen = true
-            local first_arg = args[1]
-
-            if type(first_arg) == "table" and #first_arg >= 1 and (type(first_arg[1]) == "string" or type(first_arg[1]) == "number") then
-                client_id = tostring(first_arg[1])
-            else
-                client_id = client_id or ""
-            end
-
-            last = tick()
-            samples = 1
-            hijack_ready = true
-
-            local res = SafeCall(oldfireserver, self, ...)
-            return res
-        end
-
-        local interval = now - (last or now)
-
-        if interval > 0 then
-            if samples == 0 then
-                expected_interval = interval
-            else
-                expected_interval = ema_alpha * interval + (1 - ema_alpha) * expected_interval
-            end
-
-            samples = samples + 1
-
-            if expected_interval < min_interval then
-                expected_interval = min_interval
-            end
-        end
-
-        local res = SafeCall(oldfireserver, self, ...)
-        last = tick()
-
-        return res
-        end)
-    end
-
-    local BuildSubTable = function()
-        local num_empty = math.random(1, 5)
-        local empty_map = {}
-        local empty_slots = {7}
-        empty_map[7] = true
-
-        while #empty_slots < num_empty do
-            local slot = math.random(1, 6)
-            if not empty_map[slot] then
-                empty_map[slot] = true
-                table.insert(empty_slots, slot)
-            end
-        end
-
-        table.sort(empty_slots)
-
-        local result = {}
-        for i = 1, 7 do
-            if empty_map[i] then
-                result[i] = {}
-            else
-                result[i] = kFilledSub
-            end
-        end
-
-        return result, empty_slots
-    end
-
-    local ApplyTransforms = function(t, mask, empty_slots)
-        local payload = t[1]
-        local outer_index = #payload
-        local inner_index = empty_slots[math.random(1, #empty_slots)]
-        local derived
-        local outer_val = payload[outer_index]
-
-        if type(outer_val) == "table" and type(inner_index) == "number" then
-            derived = outer_val[inner_index]
-        else
-            for i = outer_index, 1, -1 do
-                if type(payload[i]) ~= "table" then
-                    continue
-                end
-
-                local candidate = payload[i]
-
-                if type(inner_index) == "number" and candidate[inner_index] ~= nil then
-                    derived = candidate[inner_index]
-                    break
-                else
-                    derived = candidate
-                    break
-                end
-            end
-
-            if derived == nil then
-                derived = {}
-            end
-        end
-
-        local written = {}
-        local kSlotMapRef = kSlotMap
-
-        for _, value in ipairs(mask) do
-            local slot = kSlotMapRef[value]
-            if slot and not written[slot] then
-                t[slot] = derived
-                written[slot] = true
-            end
-        end
-
-        return t
-    end
-
-    local BuildPayload = function(challenge, mask)
-        local sub_table, empty_slots = BuildSubTable()
-        local total_idx = math.random(1, 8)
-        local payload = {client_id, buffer and buffer.tostring and buffer.tostring(challenge) or ""}
-        local extra_strings = math.random(0, 2)
-
-        for _ = 1, extra_strings do
-            payload[#payload + 1] = ""
-        end
-
-        while #payload < (total_idx - 1) do
-            payload[#payload + 1] = math.random(5, 100000)
-        end
-
-        payload[#payload + 1] = sub_table
-
-        local t = {
-            payload,
-            {},
-            nil,
-            nil,
-            nil,
-            nil,
-            nil
-        }
-        return ApplyTransforms(t, mask, empty_slots)
-    end
-
-    if ac_event and ac_script then
-        task.spawn(function()
-            local arm_deadline = tick() + 10
-            while not hijack_ready and tick() < arm_deadline do
-                task.wait()
-            end
-            if not hijack_ready then
-                return
-            end
-
-            ac_script.Enabled = false
-
-        ac_event.OnClientEvent:Connect(function(...)
-            last = tick()
-
-            local t = {...}
-            local challenge = t[1]
-            local index = t[2]
-            local mask = t[3]
-
-            if typeof(challenge) ~= "buffer" or type(index) ~= "number" or type(mask) ~= "table" then
-                return
-            end
-
-            local payload = BuildPayload(challenge, mask)
-            task.defer(function()
-                local since_last = tick() - (last or 0)
-                local desired_wait = expected_interval - since_last
-
-                if desired_wait > 0 then
-                    task.wait(desired_wait)
-                end
-                pcall(function()
-                    ac_event:FireServer(table.unpack(payload, 1, 5))
-                end)
-                last = tick()
-            end)
-            end)
-
-            bypassed = true
-            getgenv().FallenBypass = { bypassed = true }
-        end)
-    end
-
-    for _, name in ipairs(kKickNames) do
-        local func = LocalPlayer[name]
-        if type(func) ~= "function" then return end
-
-        local oldfunc; oldfunc = SafeHook(hookfunction, func, function(self, ...)
-            if self == LocalPlayer and not checkcaller() then
-                return nil
-            end
-            return oldfunc(self, ...)
-        end)
-    end
-
-    for _, conn in ipairs(getconnections(ScriptContext.Error)) do
-        if not conn.Function then continue end
-        if IsTrustedFunction(conn.Function) then continue end
-        SafeHook(hookfunction, conn.Function, function(...)
-            return nil
-        end)
-    end
-end)
-
-if hookmetamethod and newcclosure and checkcaller and getgenv().KiciaEnableNamecallHook == true then
-    feOldNamecall = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
-        local method = getnamecallmethod()
-        if not isRunning or checkcaller() or not method then
-            if setnamecallmethod then setnamecallmethod(method) end
-            return feOldNamecall(self, ...)
-        end
-        local m = method:lower()
-        if m == "connect" and self == feErrorSignal then
-            return nil
-        end
-        if m == "kick" and self == game:GetService("Players").LocalPlayer then
-            return
-        end
-        if m ~= "fireserver" and m ~= "invokeserver" then
-            if setnamecallmethod then setnamecallmethod(method) end
-            return feOldNamecall(self, ...)
-        end
-        if feSuspectName and typeof(self) == "Instance" and feSuspectName(self.Name) then
-            return
-        end
-        if m == "invokeserver" and typeof(self) == "Instance" and self.ClassName == "RemoteFunction" then
-            return self.InvokeServer(self, ...)
-        end
-        if setnamecallmethod then setnamecallmethod(method) end
-        return feOldNamecall(self, ...)
-    end))
+local cloneref = cloneref or function(obj)
+    return obj
 end
 
-getgenv().FallenBypassUnload = getgenv().FallenBypassUnload or {}
-table.insert(getgenv().FallenBypassUnload, function()
-    pcall(function()
-        if feACScript then feACScript.Enabled = true end
-        if getgenv and getgenv().FallenBypass then
-            getgenv().FallenBypass = nil
-        end
-        if feOldNamecall and hookmetamethod then
-            hookmetamethod(game, "__namecall", feOldNamecall)
-        end
-    end)
-end)
+local Services = {
+    players = cloneref(game:GetService("Players")),
+    run_service = cloneref(game:GetService("RunService")),
+    user_input = cloneref(game:GetService("UserInputService")),
+}
+Services.local_player = Services.players.LocalPlayer
 
+--[[ extra vars ]]
+
+local Constants = {
+    fire_delay = 0.05,
+    max_dist_sq = 1000 * 1000,
+    scatter_range = 150,
+    under = 6,
+    behind = 3,
+    melee = { Knife = true },
+    rage_key = Enum.KeyCode.X,
+    void_key = Enum.KeyCode.V,
+}
+
+local State = {
+    camera = workspace.CurrentCamera,
+    character = nil,
+    root = nil,
+    params = RaycastParams.new(),
+    real_cf = nil,
+    last_shot = 0,
+    target = nil,
+    flip = false,
+    rage = false,
+    void = false,
+    desync = false,
+    desync_con = nil,
+}
+State.params.FilterType = Enum.RaycastFilterType.Exclude
+
+--[[ helpers ]]
+
+local function on_char(char)
+    State.character = char
+    State.real_cf = nil
+    State.params.FilterDescendantsInstances = { char }
+    State.root = char:WaitForChild("HumanoidRootPart")
 end
 
+local function is_enemy(player)
+    local team = player.Team
+    return team == nil or team ~= Services.local_player.Team
+end
 
-pcall(function()
-    local lp = game:GetService("Players").LocalPlayer
-    local ctrl = lp.PlayerScripts:FindFirstChild("Controllers")
-    if ctrl then
-        local tc = ctrl:FindFirstChild("TimerController")
-        if tc then
-            local tcm = require(tc)
-            if tcm and type(tcm.SetTimeRemaining) == "function" then
-                local origSet = tcm.SetTimeRemaining
-                tcm.SetTimeRemaining = function(self, name, duration, ...)
-                    if typeof(duration) ~= "number" then
-                        if typeof(name) == "number" then
-                            duration = name
-                            name = "Timer"
-                        else
-                            return
-                        end
-                    end
-                    return origSet(self, name, duration, ...)
-                end
-            end
-        end
+local function is_alive(char)
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    return hum ~= nil and hum.Health > 0
+end
 
-        local fc = ctrl:FindFirstChild("FFlagController")
-        if fc then
-            local fcm = require(fc)
-            if fcm and type(fcm._Fetch) == "function" then
-                fcm._Fetch = function(self, ...)
-                    local res
-                    pcall(function()
-                        res = game:GetService("ReplicatedStorage").Remotes.Misc.RequestFFlags:InvokeServer()
-                    end)
-                    if typeof(res) == "table" then
-                        for i, v in pairs(res) do
-                            pcall(function() self:SetFFlag(i, v) end)
-                        end
+local function is_melee()
+    local char = State.character
+    local tool = char and char:FindFirstChildOfClass("Tool")
+    return tool ~= nil and Constants.melee[tool.Name] == true
+end
+
+local function get_target() LPH_ATTRIBUTES(PRESET(FAST))
+    local part
+    local closest = Constants.max_dist_sq
+    local origin = State.camera.CFrame.Position
+
+    for _, player in Services.players:GetPlayers() do
+        if player ~= Services.local_player and is_enemy(player) then
+            local char = player.Character
+            local head = char and char:FindFirstChild("Head")
+
+            if head and is_alive(char) then
+                local offset = head.Position - origin
+                local d = offset:Dot(offset)
+
+                if d < closest then
+                    local hit = workspace:Raycast(origin, offset, State.params)
+                    if hit == nil or hit.Instance:IsDescendantOf(char) then
+                        closest = d
+                        part = head
                     end
                 end
             end
         end
     end
+
+    return part
+end
+
+--[[ desync ]]
+
+local function desync_out()
+    local root = State.root
+    if not root or not root.Parent then return end
+
+    local cf = root.CFrame
+    State.real_cf = cf
+
+    if State.void then
+        State.flip = not State.flip
+        local part = State.rage and State.target or get_target()
+        local hrp = part and part.Parent:FindFirstChild("HumanoidRootPart")
+
+        if State.flip and hrp then
+            local t = hrp.CFrame
+            root.CFrame = is_melee() and t * CFrame.new(0, 0, Constants.behind) or t - Vector3.new(0, Constants.under, 0)
+        else
+            root.CFrame = CFrame.new(cf.X, workspace.FallenPartsDestroyHeight + 25, cf.Z)
+        end
+        return
+    end
+
+    local r = Constants.scatter_range
+    root.CFrame = (cf + Vector3.new((math.random() * 2 - 1) * r, 0, (math.random() * 2 - 1) * r))
+        * CFrame.Angles(0, math.random() * 6.2832, 0)
+end
+
+local function desync_back()
+    local root, real = State.root, State.real_cf
+    if root and real then
+        root.CFrame = real
+        State.real_cf = nil
+    end
+end
+
+local function refresh_desync()
+    local on = State.rage or State.void
+    if on == State.desync then return end
+    State.desync = on
+
+    if on then
+        State.desync_con = Services.run_service.Heartbeat:Connect(desync_out)
+        Services.run_service:BindToRenderStep("desync_back", Enum.RenderPriority.First.Value, desync_back)
+    else
+        State.desync_con:Disconnect()
+        Services.run_service:UnbindFromRenderStep("desync_back")
+        desync_back()
+    end
+end
+
+--[[ ragebot ]]
+
+local function rage_step()
+    local part = get_target()
+    State.target = part
+    if not part or not is_alive(State.character) then return end
+
+    local cam = State.camera
+    cam.CFrame = CFrame.lookAt(cam.CFrame.Position, part.Position)
+
+    local now = os.clock()
+    if now - State.last_shot >= Constants.fire_delay then
+        State.last_shot = now
+        mouse1click()
+    end
+end
+
+local function set_rage(on)
+    if on == State.rage then return end
+    State.rage = on
+
+    if on then
+        Services.run_service:BindToRenderStep("rage", Enum.RenderPriority.Camera.Value + 1, rage_step)
+    else
+        Services.run_service:UnbindFromRenderStep("rage")
+        State.target = nil
+    end
+
+    refresh_desync()
+end
+
+local function set_void(on)
+    if on == State.void then return end
+    State.void = on
+    refresh_desync()
+end
+
+--[[ connect to gui ]]
+
+workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(function() LPH_ATTRIBUTES(VM(NONE))
+    State.camera = workspace.CurrentCamera
 end)
 
-if getgenv().KiciaRebuild and getgenv().KiciaRebuild.Unload then
-    pcall(getgenv().KiciaRebuild.Unload)
-end
-if not game:IsLoaded() then game.Loaded:Wait() end
-
-local K: { [string]: any } = { connections = {}, cleanups = {}, destroyed = false }
-getgenv().KiciaRebuild = K
-
-local Players = game:GetService("Players")
-local _ReplicatedStorage = game:GetService("ReplicatedStorage")
-local _RunService = game:GetService("RunService")
-local UserInputService = game:GetService("UserInputService")
-local _CollectionService = game:GetService("CollectionService")
-local _HttpService = game:GetService("HttpService")
-local _SoundService = game:GetService("SoundService")
-local _Lighting = game:GetService("Lighting")
-local _player = Players.LocalPlayer
-
-local rawget, rawset = rawget, rawset
-
-function K.fn(name)
-    local v
-    pcall(function() v = getgenv()[name] end)
-    if type(v) ~= "function" then pcall(function() v = getgenv()[name] end) end
-    return type(v) == "function" and v or nil
+Services.local_player.CharacterAdded:Connect(on_char)
+if Services.local_player.Character then
+    on_char(Services.local_player.Character)
 end
 
-local getthreadidentity_ = K.fn("getthreadidentity") or K.fn("getidentity")
-local setthreadidentity_ = K.fn("setthreadidentity") or K.fn("setidentity")
-local _sethiddenproperty = K.fn("sethiddenproperty")
-local gethui_ = K.fn("gethui")
-local function identity(n)
-    if not setthreadidentity_ or not getthreadidentity_ then return function() end end
-    local old = getthreadidentity_()
-    pcall(setthreadidentity_, n)
-    return function() if old ~= nil then pcall(setthreadidentity_, old) end end
-end
-K.identity = identity
-local function hudParent()
-    local ok, h = pcall(function() return gethui_ and gethui_() end)
-    if ok and h then return h end
-    return game:GetService("CoreGui")
-end
-K.hudParent = hudParent
+Services.user_input.InputBegan:Connect(function(input, processed) LPH_ATTRIBUTES(VM(NONE))
+    if processed then return end
 
-function K.track(c) K.connections[#K.connections + 1] = c; return c end
-function K.onUnload(f) K.cleanups[#K.cleanups + 1] = f end
-
-local Signal = {}
-Signal.__index = Signal
-function Signal.new() return setmetatable({ _handlers = {} }, Signal) end
-function Signal:Connect(fn)
-    local h = { fn = fn, connected = true }
-    table.insert(self._handlers, h)
-    local sig = self
-    return {
-        Connected = true,
-        Disconnect = function(c)
-            if not h.connected then return end
-            h.connected = false
-            c.Connected = false
-            local i = table.find(sig._handlers, h)
-            if i then table.remove(sig._handlers, i) end
-        end,
-    }
-end
-function Signal:Once(fn)
-    local c
-    c = self:Connect(function(...) c:Disconnect(); fn(...) end)
-    return c
-end
-function Signal:Fire(...)
-    local list = table.clone(self._handlers)
-    for _, h in ipairs(list) do
-        if h.connected then task.spawn(h.fn, ...) end
+    local key = input.KeyCode
+    if key == Constants.rage_key then
+        set_rage(not State.rage)
+    elseif key == Constants.void_key then
+        set_void(not State.void)
     end
-end
-function Signal:FireSync(...)
-    for _, h in ipairs(table.clone(self._handlers)) do
-        if h.connected then h.fn(...) end
-    end
-end
-function Signal:Destroy() table.clear(self._handlers) end
-K.Signal = Signal
-
-local Trove = {}
-Trove.__index = Trove
-function Trove.new(name) return setmetatable({ _name = name, _items = {} }, Trove) end
-local function cleanItem(o)
-    local t = typeof(o)
-    if t == "RBXScriptConnection" then o:Disconnect()
-    elseif t == "Instance" then pcall(function() o:Destroy() end)
-    elseif t == "thread" then pcall(task.cancel, o)
-    elseif type(o) == "function" then pcall(o)
-    elseif type(o) == "table" then
-        local function member(k)
-            local ok, v = pcall(function() return o[k] end)
-            return ok and type(v) == "function" and v or nil
-        end
-        local cancel, getStatus = member("cancel"), member("getStatus")
-        if cancel and getStatus then pcall(cancel, o); return end
-        local destroy = member("Destroy")
-        if destroy then pcall(destroy, o); return end
-        local disconnect = member("Disconnect")
-        if disconnect then pcall(disconnect, o) end
-    end
-end
-function Trove:Add(o) table.insert(self._items, o); return o end
-function Trove:Connect(sig, fn) return self:Add(sig:Connect(fn)) end
-function Trove:Extend() return self:Add(Trove.new(self._name)) end
-function Trove:Remove(o, keep)
-    local i = table.find(self._items, o)
-    if i then
-        table.remove(self._items, i)
-        if not keep then cleanItem(o) end
-    end
-end
-function Trove:AddPromise(promise)
-    if tostring(promise:getStatus()) == "Started" then
-        self:Add(promise)
-        promise:finally(function()
-            if not self._cleaning then self:Remove(promise, true) end
-        end)
-    end
-    return promise
-end
-function Trove:AttachExtend(instance)
-    local sub = self:Extend()
-    sub:Connect(instance.Destroying, function() self:Remove(sub) end)
-    return sub
-end
-function Trove:Clean()
-    local items = self._items
-    self._items = {}
-    self._cleaning = true
-    for i = #items, 1, -1 do cleanItem(items[i]) end
-    self._cleaning = false
-end
-Trove.Destroy = Trove.Clean
-K.Trove = Trove
-
-local C = {
-    [3] = "Toggle", [9] = 20, [12] = 12, [18] = "0", [26] = 4, [34] = true, [44] = "Enabled",
-    [45] = 90, [48] = 2, [53] = 20, [55] = "Mode", [56] = 2, [62] = 0.1, [63] = 1, [68] = "table",
-    [75] = "None", [83] = 64, [91] = 100, [95] = "number", [101] = 0.5, [108] = 255, [116] = "boolean",
-    [118] = 16, [122] = 8, [126] = 0.15, [127] = "CFrame", [128] = "Frame", [133] = 10, [137] = 256,
-    [147] = 0.1, [149] = 1, [153] = false, [155] = 3, [160] = 50, [162] = 8, [165] = "string",
-    [170] = 9, [173] = 0.88, [175] = 5, [186] = 0, [192] = 30, [195] = 0.7,
-}
-K.C = C
-
-local v86 = {
-    [2] = "ReactiveStore",
-    [3] = "Toggle",
-    [4] = "UIListLayout",
-    [5] = "BackgroundColor3",
-    [6] = 0,
-    [7] = 60,
-    [8] = 60,
-    [9] = 20,
-    [12] = 12,
-    [13] = 14,
-    [14] = "Settings",
-    [15] = 120,
-    [16] = "min",
-    [17] = 200,
-    [18] = "0",
-    [19] = 200,
-    [20] = "Vector3",
-    [21] = "Always",
-    [22] = "",
-    [23] = 1.4707963267948965,
-    [24] = "Roboto",
-    [25] = 24,
-    [26] = 4,
-    [27] = "Color",
-    [28] = 0.2,
-    [29] = "Size",
-    [30] = 0.35,
-    [31] = 29,
-    [32] = 24,
-    [33] = "Button",
-    [34] = true,
-    [35] = "ConfigManager",
-    [36] = "ApplyMigrations",
-    [37] = "TextBounds",
-    [38] = "DeleteFile",
-    [39] = "Slider",
-    [40] = "...",
-    [42] = "left",
-    [43] = "Proggy Clean",
-    [44] = "Enabled",
-    [45] = 90,
-    [46] = "UIGradient",
-    [47] = "CanvasGroup",
-    [48] = 0.3,
-    [49] = 2,
-    [50] = "Side",
-    [51] = " ",
-    [52] = "BottomRight",
-    [53] = 92,
-    [54] = 6,
-    [55] = "Mode",
-    [56] = 2,
-    [57] = "TextColor",
-    [58] = 80,
-    [59] = "Font",
-    [60] = 29,
-    [61] = 20,
-    [62] = 0.1,
-    [63] = 1,
-    [64] = "ScrollingFrame",
-    [65] = 200,
-    [66] = 0.5,
-    [67] = 100,
-    [68] = "table",
-    [69] = "Catalog unavailable",
-    [70] = "GradientDark",
-    [71] = 10,
-    [72] = 12,
-    [73] = "Keybind",
-    [74] = 0.9,
-    [75] = "None",
-    [76] = "LoadFromFile",
-    [77] = "FireServer",
-    [78] = 720,
-    [79] = 255,
-    [80] = "Text",
-    [81] = 1,
-    [82] = "Realize() can only be called on the root",
-    [83] = 64,
-    [84] = 0.5,
-    [85] = "UIStroke",
-    [87] = 0.8,
-    [88] = "TabHighlight",
-    [89] = "Loading",
-    [90] = "Gradient",
-    [91] = 100,
-    [92] = "TextButton",
-    [93] = "ColorSequence",
-    [94] = "Options",
-    [95] = "number",
-    [96] = "Unselected",
-    [97] = "Mode",
-    [98] = "UICorner",
-    [99] = "ExportToJson",
-    [100] = 14,
-    [101] = 0.5,
-    [102] = 231,
-    [103] = 52,
-    [104] = "Fonts",
-    [105] = 0.85,
-    [106] = "Menu Keybind",
-    [107] = 40,
-    [108] = 255,
-    [109] = 77,
-    [110] = 70,
-    [111] = "Fetching items...",
-    [112] = "Invisible",
-    [113] = "UIPadding",
-    [114] = "primary",
-    [115] = "Color3",
-    [116] = "boolean",
-    [118] = 16,
-    [119] = 159,
-    [120] = "Outline",
-    [121] = "ImageButton",
-    [122] = 8,
-    [123] = 19,
-    [124] = "X",
-    [125] = "Proggy Tiny",
-    [126] = 0.15,
-    [127] = "CFrame",
-    [128] = "Frame",
-    [129] = "Show Watermark",
-    [131] = "AbsoluteSize",
-    [132] = "Breathing",
-    [133] = 10,
-    [134] = "GradientTop",
-    [135] = "TextLabel",
-    [136] = "Unselected Text",
-    [137] = 256,
-    [138] = 0.85,
-    [139] = "Accent",
-    [140] = "danger",
-    [141] = "GradientDeep",
-    [142] = "Silent Load",
-    [143] = 32,
-    [144] = 20,
-    [145] = "Dialog has been destroyed",
-    [146] = "ImageLabel",
-    [147] = 0.1,
-    [148] = "TextBox",
-    [149] = 1,
-    [150] = "stop",
-    [151] = "family",
-    [153] = false,
-    [154] = "ScrollBarImageColor3",
-    [155] = 3,
-    [156] = "ImageColor3",
-    [157] = 20,
-    [158] = "secondary",
-    [159] = 20,
-    [160] = 50,
-    [161] = 0.5,
-    [162] = 8,
-    [163] = 80,
-    [164] = "hue",
-    [165] = "string",
-    [166] = "family",
-    [167] = "TextColor3",
-    [168] = "ElementBackground",
-    [169] = "FromJson",
-    [170] = 9,
-    [172] = "none",
-    [173] = 0.88,
-    [174] = "Unselected",
-    [175] = 5,
-    [176] = "UISizeConstraint",
-    [177] = "Try a different search.",
-    [178] = "ElementBackground",
-    [181] = 10,
-    [182] = "HttpService",
-    [183] = 72,
-    [184] = "Color",
-    [186] = 0,
-    [187] = "GradientMid",
-    [189] = "Position",
-    [190] = "Search...",
-    [191] = "TabShadow",
-    [192] = 30,
-    [193] = 0,
-    [194] = "Hold",
-    [195] = 0.7,
-    [196] = "Viewport",
-    [197] = "Y",
-    [198] = 400,
-    [199] = "Unload",
-    [200] = 26,
-}
-local tbl17: { [string]: any } = { cache = {} }
-local v102, v103, v107 = rawget, rawset, pcall
-local n25, n26 = 3870, 4800
-local flag2, flag3 = true, true
-local function n29(...) return 0 end
-local cloneref = K.fn("cloneref") or function(x) return x end
-local gethui = K.fn("gethui") or function() return game:GetService("CoreGui") end
-local _KiciaGetId = K.fn("getthreadidentity") or K.fn("getidentity")
-local _KiciaSetId = K.fn("setthreadidentity") or K.fn("setidentity")
-local _KiciaIsTouch = false
-do
-local _ok, _uis = pcall(function() return game:GetService("UserInputService") end)
-_KiciaIsTouch = _ok and _uis.TouchEnabled and not _uis.KeyboardEnabled or false
-end
-local getthreadidentity = _KiciaGetId or function() return 8 end
-local _KiciaCanSet = _KiciaSetId ~= nil and (_KiciaGetId ~= nil or not _KiciaIsTouch)
-local setthreadidentity = _KiciaCanSet and _KiciaSetId or function() end
-local function clonefn(f)
-    local c = K.fn("clonefunction")
-    if c and f then
-        local ok, r = pcall(c, f)
-        if ok and r then return r end
-    end
-    return f
-end
-local fireServer = clonefn(Instance.new("RemoteEvent").FireServer)
-local fireServer2 = clonefn(Instance.new("UnreliableRemoteEvent").FireServer)
-local v104 = clonefn(K.fn("sethiddenproperty"))
-local v108 = clonefn(K.fn("setfflag")) or function() end
-local v109 = clonefn(K.fn("isexecutorclosure")) or function() return false end
-local v110 = clonefn(K.fn("setrawmetatable")) or setmetatable
-local v111 = clonefn(K.fn("getrawmetatable")) or getmetatable
-local v112 = clonefn(v111(game).__newindex)
-local v113 = clonefn(v111(game).__index)
-local v114 = clonefn(game.FindFirstChildOfClass)
-local function _n27() return 0 end
-local firetouchinterest = K.fn("firetouchinterest") or function() end
-local getconnections = K.fn("getconnections") or function() return {} end
-local setclipboard = K.fn("setclipboard") or K.fn("toclipboard") or function() end
-local InstanceHandle
-pcall(function() InstanceHandle = getgenv().InstanceHandle end)
-if InstanceHandle == nil then pcall(function() InstanceHandle = getgenv().InstanceHandle end) end
-if InstanceHandle == nil then InstanceHandle = { new = function(x) return x end } end
-
-tbl17.k = function() return { new = function(name) return Trove.new(name) end } end
-
-do
-    local UIS = UserInputService
-    local _GuiService = game:GetService("GuiService")
-    local function camera() return workspace.CurrentCamera end
-    local W = {}
-    function W.appendPath(path, key)
-        local p = table.clone(path)
-        table.insert(p, key)
-        return p
-    end
-    function W.currentViewportSize()
-        local c = camera()
-        return c and c.ViewportSize or Vector2.new(1920, 1080)
-    end
-    function W.connectCurrentCameraViewport(trove, cb)
-        local inner = trove:Extend()
-        local function bind()
-            inner:Clean()
-            local c = camera()
-            if c == nil then return end
-            inner:Connect(c:GetPropertyChangedSignal("ViewportSize"), function() cb(c.ViewportSize) end)
-            cb(c.ViewportSize)
-        end
-        trove:Connect(workspace:GetPropertyChangedSignal("CurrentCamera"), bind)
-        bind()
-    end
-    function W.absoluteToLayerOffset(layer, pos)
-        return pos - layer.AbsolutePosition
-    end
-    function W.clampOffsetToViewport(x, y, size)
-        local vp = W.currentViewportSize()
-        return math.clamp(x, 0, math.max(0, vp.X - size.X)), math.clamp(y, 0, math.max(0, vp.Y - size.Y))
-    end
-    function W.clampGuiToViewport(gui)
-        local vp = W.currentViewportSize()
-        local ap, as = gui.AbsolutePosition, gui.AbsoluteSize
-        local dx = math.clamp(ap.X, 0, math.max(0, vp.X - as.X)) - ap.X
-        local dy = math.clamp(ap.Y, 0, math.max(0, vp.Y - as.Y)) - ap.Y
-        if dx ~= 0 or dy ~= 0 then
-            local p = gui.Position
-            gui.Position = UDim2.new(p.X.Scale, p.X.Offset + dx, p.Y.Scale, p.Y.Offset + dy)
-        end
-    end
-    function W.snapPosition(u)
-        return UDim2.new(u.X.Scale, math.round(u.X.Offset), u.Y.Scale, math.round(u.Y.Offset))
-    end
-    function W.onScreenKeyboardTop()
-        local ok, visible = pcall(function() return UIS.OnScreenKeyboardVisible end)
-        if not ok or not visible then return nil end
-        local ok2, pos = pcall(function() return UIS.OnScreenKeyboardPosition end)
-        return ok2 and pos and pos.Y or nil
-    end
-    function W.connectOnScreenKeyboard(trove, cb)
-        pcall(function() trove:Connect(UIS:GetPropertyChangedSignal("OnScreenKeyboardVisible"), cb) end)
-        pcall(function() trove:Connect(UIS:GetPropertyChangedSignal("OnScreenKeyboardPosition"), cb) end)
-    end
-    function W.getPointerPosition()
-        return UIS:GetMouseLocation()
-    end
-    function W.matchesPointerDrag(input, started, movement)
-        if started ~= nil and started.UserInputType == Enum.UserInputType.Touch then return input == started end
-        return input.UserInputType == movement
-    end
-    function W.round(v, step)
-        if step == nil or step == 0 then return v end
-        return math.round(v / step) * step
-    end
-    W.KeyNames = {
-        [Enum.UserInputType.MouseButton1] = "MB1", [Enum.UserInputType.MouseButton2] = "MB2",
-        [Enum.UserInputType.MouseButton3] = "MB3", [Enum.KeyCode.LeftShift] = "LShift",
-        [Enum.KeyCode.RightShift] = "RShift", [Enum.KeyCode.LeftControl] = "LCtrl",
-        [Enum.KeyCode.RightControl] = "RCtrl", [Enum.KeyCode.LeftAlt] = "LAlt", [Enum.KeyCode.RightAlt] = "RAlt",
-    }
-    function W.serializeKey(key)
-        if typeof(key) ~= "EnumItem" then return nil end
-        return tostring(key.EnumType) .. "." .. key.Name
-    end
-    function W.deserializeKey(s)
-        if type(s) ~= "string" then return nil end
-        local kind, name = s:match("^(%w+)%.(%w+)$")
-        if kind == nil then return nil end
-        local ok, v = pcall(function() return Enum[kind][name] end)
-        return ok and v or nil
-    end
-    function W.findScrollingAncestor(inst)
-        local p = inst and inst.Parent
-        while p ~= nil do
-            if p:IsA("ScrollingFrame") then return p end
-            p = p.Parent
-        end
-        return nil
-    end
-    function W.isEffectivelyVisible(gui)
-        local p = gui
-        while p ~= nil and p ~= game do
-            if p:IsA("GuiObject") and not p.Visible then return false end
-            if p:IsA("LayerCollector") then return p.Enabled end
-            p = p.Parent
-        end
-        return false
-    end
-    function W.ensureStorageDirectories(dir)
-        local isf, mkf = K.fn("isfolder"), K.fn("makefolder")
-        if not (isf and mkf) or type(dir) ~= "string" then return end
-        local function make(path)
-            local acc
-            for part in path:gmatch("[^/]+") do
-                acc = acc and (acc .. "/" .. part) or part
-                pcall(function() if not isf(acc) then mkf(acc) end end)
-            end
-        end
-        make(dir)
-        make(dir .. "/configs")
-    end
-    tbl17.w = function() return W end
-end
-
-do
-    local P = {}
-    function P.bind(trove, config, control, path, opts)
-        local debounce = opts ~= nil and opts.Debounce == true
-        local writeBack = opts ~= nil and opts.WriteBack or nil
-        control:Set(config:Get(path), true)
-        trove:Connect(config:Changed(path), function(v) control:Set(v, true) end)
-        local pending, scheduled = nil, false
-        local function write(v)
-            if writeBack then writeBack(v) else config:Set(path, v) end
-        end
-        trove:Connect(control.Changed, function(v)
-            if not debounce then write(v); return end
-            pending = v
-            if scheduled then return end
-            scheduled = true
-            task.delay(0.05, function()
-                scheduled = false
-                write(pending)
-            end)
-        end)
-    end
-    tbl17.P = function() return P end
-end
-
-do
-    local Spring = {}
-    local function posVel(self, now)
-        local p0, v0, p1, d, s = self._p0, self._v0, self._target, self._damper, self._speed
-        local t = s * (now - self._t0)
-        local d2 = d * d
-        local h, si, co
-        if d2 < 1 then
-            h = math.sqrt(1 - d2)
-            local ep = math.exp(-d * t) / h
-            co, si = ep * math.cos(h * t), ep * math.sin(h * t)
-        elseif d2 == 1 then
-            h = 1
-            local ep = math.exp(-d * t) / h
-            co, si = ep, ep * t
-        else
-            h = math.sqrt(d2 - 1)
-            local u, v = math.exp((-d + h) * t) / (2 * h), math.exp((-d - h) * t) / (2 * h)
-            co, si = u + v, u - v
-        end
-        local a0, a1 = h * co + d * si, 1 - (h * co + d * si)
-        local a2 = si / s
-        local b0, b1, b2 = -s * si, s * si, h * co - d * si
-        return a0 * p0 + a1 * p1 + a2 * v0, b0 * p0 + b1 * p1 + b2 * v0
-    end
-    function Spring.new(initial, clock)
-        initial = initial or 0
-        clock = clock or os.clock
-        return setmetatable({ _clock = clock, _t0 = clock(), _p0 = initial, _v0 = 0 * initial, _target = initial,
-            _damper = 1, _speed = 1 }, Spring)
-    end
-    function Spring:Impulse(v) self.Velocity = self.Velocity + v end
-    function Spring:SetTarget(value, doNotAnimate)
-        if doNotAnimate then
-            self._p0, self._v0, self._target, self._t0 = value, 0 * value, value, self._clock()
-        else
-            self.Target = value
-        end
-    end
-    function Spring:TimeSkip(delta)
-        local now = self._clock()
-        local p, v = posVel(self, now + delta)
-        self._p0, self._v0, self._t0 = p, v, now
-    end
-    Spring.__index = function(self, k)
-        if Spring[k] then return Spring[k] end
-        if k == "Value" or k == "Position" or k == "p" then local p = posVel(self, self._clock()); return p
-        elseif k == "Velocity" or k == "v" then local _, v = posVel(self, self._clock()); return v
-        elseif k == "Target" or k == "t" then return self._target
-        elseif k == "Damper" or k == "d" then return self._damper
-        elseif k == "Speed" or k == "s" then return self._speed
-        elseif k == "Clock" then return self._clock end
-        return nil
-    end
-    Spring.__newindex = function(self, k, v)
-        local now = self._clock()
-        if k == "Value" or k == "Position" or k == "p" then
-            local _, vel = posVel(self, now)
-            self._p0, self._v0 = v, vel
-        elseif k == "Velocity" or k == "v" then
-            local pos = posVel(self, now)
-            self._p0, self._v0 = pos, v
-        elseif k == "Target" or k == "t" then
-            local pos, vel = posVel(self, now)
-            self._p0, self._v0, self._target = pos, vel, v
-        elseif k == "Damper" or k == "d" then
-            local pos, vel = posVel(self, now)
-            self._p0, self._v0, self._damper = pos, vel, v
-        elseif k == "Speed" or k == "s" then
-            local pos, vel = posVel(self, now)
-            self._p0, self._v0, self._speed = pos, vel, v < 0 and 0 or v
-        elseif k == "Clock" then
-            local pos, vel = posVel(self, now)
-            self._clock, self._t0, self._p0, self._v0 = v, v(), pos, vel
-            return
-        else
-            rawset(self, k, v)
-            return
-        end
-        self._t0 = now
-    end
-    tbl17.c5 = function() return Spring end
-end
-
-tbl17.ca = function() return nil end
-
-do
-    local soft = "rbxasset://textures/particles/smoke_main.dds"
-    local sparkle = "rbxasset://textures/particles/sparkles_main.dds"
-    local function spec(t)
-        t.RotationMin, t.RotationMax = t.RotationMin or 0, t.RotationMax or 360
-        t.RotationSpeedMin, t.RotationSpeedMax = t.RotationSpeedMin or -40, t.RotationSpeedMax or 40
-        return t
-    end
-    local W = {
-        EmitterSpecsByPreset = {
-            Snow = {
-                spec({ Texture = soft, TransparencyMax = 0.15, LifetimeMin = 6, LifetimeMax = 9, BaseRate = 220,
-                    SpeedMin = 6, SpeedMax = 10, SizeStart = 0.35, SizeEnd = 0.25, BaseSpread = 0.4, BaseAccelerationY = -1 }),
-                spec({ Texture = sparkle, TransparencyMax = 0.35, LifetimeMin = 6, LifetimeMax = 9, BaseRate = 60,
-                    SpeedMin = 5, SpeedMax = 8, SizeStart = 0.2, SizeEnd = 0.15, BaseSpread = 0.6, BaseAccelerationY = -0.5 }),
-            },
-            Rain = {
-                spec({ Texture = soft, TransparencyMax = 0.35, LifetimeMin = 1.2, LifetimeMax = 1.8, BaseRate = 600,
-                    SpeedMin = 70, SpeedMax = 90, SizeStart = 0.12, SizeEnd = 0.1, BaseSpread = 0.05, BaseAccelerationY = -40,
-                    RotationMin = 0, RotationMax = 0, RotationSpeedMin = 0, RotationSpeedMax = 0,
-                    Orientation = Enum.ParticleOrientation.VelocityParallel }),
-            },
-            Blizzard = {
-                spec({ Texture = soft, TransparencyMax = 0.1, LifetimeMin = 3, LifetimeMax = 5, BaseRate = 700,
-                    SpeedMin = 18, SpeedMax = 28, SizeStart = 0.3, SizeEnd = 0.2, BaseSpread = 0.8, BaseAccelerationY = -6 }),
-                spec({ Texture = soft, TransparencyMax = 0.75, LifetimeMin = 3, LifetimeMax = 5, BaseRate = 120,
-                    SpeedMin = 14, SpeedMax = 22, SizeStart = 3, SizeEnd = 5, BaseSpread = 1, BaseAccelerationY = -2 }),
-            },
-        },
-        LightningPresetSet = { Rain = true },
-        LightningRadiusMin = 20,
-        LightningGroundDrop = 40,
-        LightningRayLength = 1000,
-        LightningJitter = 30,
-        ThunderSoundId = "",
-        ThunderSpeed = 340,
-        ThunderVolumeFloor = 0.2,
-        ThunderFalloff = 600,
-        ThunderPitchMin = 0.85,
-        ThunderPitchMax = 1.1,
-    }
-    tbl17.hH = function() return W end
-end
-
-tbl17.iQ = function()
-    return function(_, _, grid)
-        local enable = tbl17.h6()
-        local fonts = tbl17.az().Order
-        local function P(...) return { "Esp", ... } end
-
-        local main = grid:AddSection({ Title = "Player ESP", Side = "left" })
-        enable(main, "Enable ESP", { "Always", "Toggle", "Hold" }, P("Main"), true)
-        main:AddDropdown({ Label = "Box Fit", Options = { "Static", "Dynamic" }, Config = P("Main", "Mode") })
-
-        local look = grid:AddSection({ Title = "Text", Side = "right" })
-        look:AddToggle({ Label = "Use Display Names", Config = P("Settings", "UseDisplayName") })
-        look:AddDropdown({ Label = "Font", Options = fonts, Config = P("Settings", "Font") })
-        look:AddSlider({ Label = "Font Size", Min = 8, Max = 32, Config = P("Settings", "FontSize") })
-        look:AddDropdown({ Label = "Text Case", Options = { "Standard", "UPPERCASE", "lowercase" }, Config = P("Settings", "TextCase") })
-        look:AddDropdown({ Label = "Text Surround", Options = { "None", "[]", "()", "<>", "{}" }, Config = P("Settings", "TextSurround") })
-        look:AddDivider({ Label = "Flags" })
-        look:AddDropdown({ Label = "Flag Font", Options = fonts, Config = P("Settings", "FlagFont") })
-        look:AddSlider({ Label = "Flag Font Size", Min = 6, Max = 24, Config = P("Settings", "FlagFontSize") })
-        look:AddDropdown({ Label = "Flag Text Case", Options = { "Standard", "UPPERCASE", "lowercase" }, Config = P("Settings", "FlagTextCase") })
-        look:AddDropdown({ Label = "Flag Surround", Options = { "None", "[]", "()", "<>", "{}" }, Config = P("Settings", "FlagTextSurround") })
-        look:AddGroup({ Source = look:AddToggle({ Label = "Scale With Distance", Config = P("Settings", "DistanceScaling") }) })
-            :AddSlider({ Label = "Reference Distance", Min = 10, Max = 300, Config = P("Settings", "DistanceScalingRef") })
+end)
 
         local function side(title, key, where)
             local s = grid:AddSection({ Title = title, Side = where })
