@@ -1,0 +1,56 @@
+-- UNNAMED STYLE POV VOID (Super Powerful)
+					if cfg.VoidSpam and not inFireWindow and isRoundStarted() then
+						local strength = math.clamp(tonumber(cfg.VoidStrength) or 32, 8, 55)
+						
+						-- 1. Calculate deep void position (Aggressive Drop)
+						-- Drops you extremely deep into the void to ensure you are out of bounds
+						local voidY = -100 - (strength * 4)
+						local voidPos = Vector3.new(oldCF.Position.X, voidY, oldCF.Position.Z)
+						
+						-- 2. Save the real camera POV
+						local realCamCFrame = workspace.CurrentCamera.CFrame
+						
+						-- 3. Snap the character into the void
+						applyCF = CFrame.lookAt(voidPos, targetHead.Position)
+						
+						-- 4. Shoot from the void (Multi-Packet + Prediction)
+						task.defer(function()
+							-- Velocity prediction for moving targets
+							local predictedPos = targetHead.Position
+							pcall(function()
+								if targetHead.AssemblyLinearVelocity then
+									local dist = (voidPos - targetHead.Position).Magnitude
+									local travelTime = dist / 300 -- Assuming fast projectile speed
+									predictedPos = targetHead.Position + (targetHead.AssemblyLinearVelocity * travelTime)
+								end
+							end)
+
+							local aimCF = CFrame.lookAt(voidPos, predictedPos)
+							local cameradata = {
+								[utf8.char(1)] = {
+									[utf8.char(0)] = util:EncodeCFrame(aimCF), -- Spoofed Void Origin
+									[utf8.char(1)] = util:EncodeCFrame(targetHead.CFrame),
+									[utf8.char(2)] = targetHead,
+									[utf8.char(3)] = util:EncodeCFrame(CFrame.new(0,0,0)),
+								}
+							}
+							
+							-- Fire the shot while in the void
+							local remote = repS.Remotes.Replication.Fighter.UseItem
+							local shot = enum:ToEnum("StartShooting")
+							
+							-- Multi-packet spoofing (3 shots ensures the server accepts the hit even with packet loss)
+							for _ = 1, 3 do
+								pcall(function() remote:FireServer(objectId, shot, cameradata, nil) end)
+							end
+							
+							-- 5. Snap back to reality so the POV doesn't break
+							task.wait()
+							workspace.CurrentCamera.CFrame = realCamCFrame
+						end)
+						
+						pcall(function()
+							local n = targetPlayer and targetPlayer.Name or "?"
+							setRageHud("ragebot: voiding @" .. n)
+						end)
+					end
