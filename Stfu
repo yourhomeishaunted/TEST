@@ -1,67 +1,51 @@
 if slotName == "Melee" then
-						-- ALWAYS BACKSTAB (Forces the game's internal backstab logic)
+						-- NATURAL BACKSTAB (Work with the server, not against it)
 						local targetChar = targetPlayer and targetPlayer.Character
-						if targetChar then
-							-- 1. Force the victim's backstab angle to 360 (always vulnerable)
-							local fctrl = FighterController
-							if fctrl and fctrl.Objects then
-								for _, fighterObj in fctrl.Objects do
-									if fighterObj.Player == targetPlayer and fighterObj.Entity then
-										pcall(function()
-											local item = fighterObj.EquippedItem
-											if item and item.Info then
-												item.Info.CanBackstab = true
-												item.Info.BackstabOnly = false
-												item.Info.BackstabAngle = 360
-											end
-										end)
-										pcall(function()
-											local entity = fighterObj.Entity
-											if entity and entity.Data then
-												entity.Data.CanBackstab = true
-												entity.Data.BackstabAngle = 360
-											end
-										end)
-										break
-									end
-								end
-							end
-
-							-- 2. Position exactly inside the head hitbox
-							local realHead = targetHead
-							if realHead then
-								local backPos = realHead.Position - (realHead.CFrame.LookVector * 0.5) + Vector3.new(0, 0.2, 0)
-								local headAimCF = CFrame.lookAt(backPos, realHead.Position)
-								
-								local naturalCamData = {
-									[utf8.char(1)] = {
-										[utf8.char(0)] = util:EncodeCFrame(headAimCF),
-										[utf8.char(1)] = util:EncodeCFrame(realHead.CFrame),
-										[utf8.char(2)] = realHead,
-										[utf8.char(3)] = util:EncodeCFrame(CFrame.new(0,0,0)),
-									}
+						if targetChar and targetHead then
+							
+							-- 1. Find the absolute center of the target's head
+							local headCenter = targetHead.Position
+							
+							-- 2. Look exactly at their HumanoidRootPart (their torso)
+							-- This forces the camera/character to face their back.
+							local lookAtTorso = targetRoot.Position
+							
+							-- 3. Create the perfect backstab CFrame
+							local backstabCF = CFrame.lookAt(headCenter, lookAtTorso)
+							
+							-- 4. Apply the position instantly
+							lplr.Character.HumanoidRootPart.CFrame = backstabCF
+							
+							-- 5. Build the packet so the server knows you are inside the head
+							local naturalCamData = {
+								[utf8.char(1)] = {
+									[utf8.char(0)] = util:EncodeCFrame(backstabCF),
+									[utf8.char(1)] = util:EncodeCFrame(targetHead.CFrame),
+									[utf8.char(2)] = targetHead,
+									[utf8.char(3)] = util:EncodeCFrame(CFrame.new(0,0,0)),
 								}
-
-								local heavy = enum:ToEnum("HeavyAttackAnimation1") or enum:ToEnum("HeavyAttack1")
-								local atk = enum:ToEnum("AttackAnimation1") or enum:ToEnum("Attack1")
-								local z1 = utf8.char(1)
-								local z2 = utf8.char(2)
-								
-								-- 3. Scope in and swing
-								pcall(function()
-									local lf = FighterController.LocalFighter
-									if lf and type(lf.Input) == "function" then
-										lf:Input("StartAiming")
-									end
-								end)
-
-								for _ = 1, 15 do
-									pcall(function() remote:FireServer(objectId, enum:ToEnum("StartAiming"), {[z1] = naturalCamData[z1], [z2] = heavy}, nil) end)
-									pcall(function() remote:FireServer(objectId, shot, {[z1] = naturalCamData[z1], [z2] = atk}, nil) end)
-									pcall(function() remote:FireServer(objectId, shot, naturalCamData, nil) end)
+							}
+							
+							-- 6. Scope in so the knife actually swings
+							pcall(function()
+								local lf = FighterController.LocalFighter
+								if lf and type(lf.Input) == "function" then
+									lf:Input("StartAiming")
 								end
-								
-								setRageHud("ragebot: backstab @" .. targetPlayer.Name)
+							end)
+
+							-- 7. Fire the attack
+							local heavy = enum:ToEnum("HeavyAttackAnimation1") or enum:ToEnum("HeavyAttack1")
+							local atk = enum:ToEnum("AttackAnimation1") or enum:ToEnum("Attack1")
+							local z1 = utf8.char(1)
+							local z2 = utf8.char(2)
+							
+							for _ = 1, 15 do
+								pcall(function() remote:FireServer(objectId, enum:ToEnum("StartAiming"), {[z1] = naturalCamData[z1], [z2] = heavy}, nil) end)
+								pcall(function() remote:FireServer(objectId, shot, {[z1] = naturalCamData[z1], [z2] = atk}, nil) end)
+								pcall(function() remote:FireServer(objectId, shot, naturalCamData, nil) end)
 							end
+							
+							setRageHud("ragebot: backstab @" .. targetPlayer.Name)
 						end
 					end
