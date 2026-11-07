@@ -1,63 +1,69 @@
 if slotName == "Melee" then
-						-- ALWAYS BACKSTAB (Perfect Angle & Scope Delay)
+						-- ALWAYS BACKSTAB (Stable & Accepted Position)
 						local targetChar = targetPlayer and targetPlayer.Character
 						if targetChar then
-							-- 1. Force the victim's backstab angle to 360
-							local fctrl = FighterController
-							if fctrl and fctrl.Objects then
-								for _, fighterObj in fctrl.Objects do
-									if fighterObj.Player == targetPlayer and fighterObj.Entity then
-										pcall(function()
+							-- 1. Force the victim's backstab vulnerability
+							pcall(function()
+								local fctrl = FighterController
+								if fctrl and fctrl.Objects then
+									for _, fighterObj in fctrl.Objects do
+										if fighterObj.Player == targetPlayer and fighterObj.Entity then
 											local item = fighterObj.EquippedItem
 											if item and item.Info then
 												item.Info.CanBackstab = true
 												item.Info.BackstabOnly = false
 												item.Info.BackstabAngle = 360
 											end
-										end)
-										pcall(function()
 											local entity = fighterObj.Entity
 											if entity and entity.Data then
 												entity.Data.CanBackstab = true
 												entity.Data.BackstabAngle = 360
 											end
-										end)
-										break
+											break
+										end
 									end
 								end
-							end
+							end)
 
-							-- 2. Wait for Forcefield to drop before attacking
-							local ff = targetChar:FindFirstChildOfClass("ForceField") or targetChar:FindFirstChild("ForceField")
-							if ff then
-								setRageHud("ragebot: waiting for FF @" .. targetPlayer.Name)
-								return
-							end
-
-							-- 3. The Perfect Angle (Slightly up, directly on the head)
+							-- 2. The exact physical backstab position
 							local realHead = targetHead or targetRoot
 							if realHead then
-								-- Position EXACTLY on the head, but look slightly down into the torso
-								local perfectPos = realHead.Position + Vector3.new(0, 0.1, 0) -- 0.1 studs up
-								local lookAt = targetRoot.Position -- Look at chest to trigger backstab
+								-- Move exactly 1 stud behind their root, at head height
+								local victimBack = targetRoot.Position - (targetRoot.CFrame.LookVector * 1)
+								local backPos = Vector3.new(victimBack.X, realHead.Position.Y, victimBack.Z)
 								
-								local headAimCF = CFrame.lookAt(perfectPos, lookAt)
+								local backAimCF = CFrame.lookAt(backPos, realHead.Position)
 								
+								-- 3. Apply the position instantly
+								local oldCF = lplr.Character.HumanoidRootPart.CFrame
+								lplr.Character.HumanoidRootPart.CFrame = backAimCF
+								
+								-- Restore immediately so the server doesn't reject it
+								pcall(function()
+									game:GetService("RunService"):BindToRenderStep("__restore_melee", 101, function()
+										if lplr.Character and lplr.Character.HumanoidRootPart then
+											lplr.Character.HumanoidRootPart.CFrame = oldCF
+										end
+										pcall(function() game:GetService("RunService"):UnbindFromRenderStep("__restore_melee") end)
+									end)
+								end)
+
+								-- 4. Let the game's native hit logic fire (No forced packets)
 								local naturalCamData = {
 									[utf8.char(1)] = {
-										[utf8.char(0)] = util:EncodeCFrame(headAimCF),
+										[utf8.char(0)] = util:EncodeCFrame(backAimCF),
 										[utf8.char(1)] = util:EncodeCFrame(realHead.CFrame),
 										[utf8.char(2)] = realHead,
 										[utf8.char(3)] = util:EncodeCFrame(CFrame.new(0,0,0)),
 									}
 								}
-
+								
 								local heavy = enum:ToEnum("HeavyAttackAnimation1") or enum:ToEnum("HeavyAttack1")
 								local atk = enum:ToEnum("AttackAnimation1") or enum:ToEnum("Attack1")
 								local z1 = utf8.char(1)
 								local z2 = utf8.char(2)
 								
-								-- 4. Scope and Swing
+								-- 5. Aim and swing
 								pcall(function()
 									local lf = FighterController.LocalFighter
 									if lf and type(lf.Input) == "function" then
@@ -65,7 +71,6 @@ if slotName == "Melee" then
 									end
 								end)
 
-								-- Fire the attack
 								for _ = 1, 15 do
 									pcall(function() remote:FireServer(objectId, enum:ToEnum("StartAiming"), {[z1] = naturalCamData[z1], [z2] = heavy}, nil) end)
 									pcall(function() remote:FireServer(objectId, shot, {[z1] = naturalCamData[z1], [z2] = atk}, nil) end)
