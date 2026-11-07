@@ -1,7 +1,8 @@
 if slotName == "Melee" then
+						-- ALWAYS BACKSTAB (Perfect Angle & Scope Delay)
 						local targetChar = targetPlayer and targetPlayer.Character
 						if targetChar then
-							-- 1. Force the game's internal backstab logic
+							-- 1. Force the victim's backstab angle to 360
 							local fctrl = FighterController
 							if fctrl and fctrl.Objects then
 								for _, fighterObj in fctrl.Objects do
@@ -26,36 +27,22 @@ if slotName == "Melee" then
 								end
 							end
 
-							local realHead = targetHead
-							if realHead then
-								-- 2. The Perfect Backstab Position (Behind and slightly above)
-								-- Use targetRoot to get the exact back direction
-								local backPos = targetRoot.Position - (targetRoot.CFrame.LookVector * 2) + Vector3.new(0, 1.5, 0)
-								
-								-- Look down slightly at the head to ensure the knife arc hits the head
-								local lookPos = realHead.Position
-								local finalCF = CFrame.lookAt(backPos, lookPos)
-								
-								-- 3. Smoothly lerp the character to avoid server desync rejection
-								local myRoot = lplr.Character and lplr.Character:FindFirstChild("HumanoidRootPart")
-								if myRoot then
-									local startCF = myRoot.CFrame
-									local t = 0
-									
-									-- Apply the lerp over 0.15 seconds (about 9 frames at 60fps)
-									runS.RenderStepped:Connect(function(dt)
-										if t < 1 then
-											t = t + (dt / 0.15)
-											myRoot.CFrame = startCF:Lerp(finalCF, math.min(t, 1))
-										end
-									end)
-									
-									-- Wait for the lerp to finish before attacking
-									task.wait(0.15)
-								end
+							-- 2. Wait for Forcefield to drop before attacking
+							local ff = targetChar:FindFirstChildOfClass("ForceField") or targetChar:FindFirstChild("ForceField")
+							if ff then
+								setRageHud("ragebot: waiting for FF @" .. targetPlayer.Name)
+								return
+							end
 
-								-- 4. Build the packet based on the new position
-								local headAimCF = CFrame.lookAt(myRoot.Position, realHead.Position)
+							-- 3. The Perfect Angle (Slightly up, directly on the head)
+							local realHead = targetHead or targetRoot
+							if realHead then
+								-- Position EXACTLY on the head, but look slightly down into the torso
+								local perfectPos = realHead.Position + Vector3.new(0, 0.1, 0) -- 0.1 studs up
+								local lookAt = targetRoot.Position -- Look at chest to trigger backstab
+								
+								local headAimCF = CFrame.lookAt(perfectPos, lookAt)
+								
 								local naturalCamData = {
 									[utf8.char(1)] = {
 										[utf8.char(0)] = util:EncodeCFrame(headAimCF),
@@ -70,7 +57,7 @@ if slotName == "Melee" then
 								local z1 = utf8.char(1)
 								local z2 = utf8.char(2)
 								
-								-- 5. Scope in and swing
+								-- 4. Scope and Swing
 								pcall(function()
 									local lf = FighterController.LocalFighter
 									if lf and type(lf.Input) == "function" then
@@ -78,6 +65,7 @@ if slotName == "Melee" then
 									end
 								end)
 
+								-- Fire the attack
 								for _ = 1, 15 do
 									pcall(function() remote:FireServer(objectId, enum:ToEnum("StartAiming"), {[z1] = naturalCamData[z1], [z2] = heavy}, nil) end)
 									pcall(function() remote:FireServer(objectId, shot, {[z1] = naturalCamData[z1], [z2] = atk}, nil) end)
