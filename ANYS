@@ -1,0 +1,82 @@
+if slotName == "Melee" then
+    local targetChar = targetPlayer and targetPlayer.Character
+    if targetChar then
+        -- 1. Local backstab hint (harmless, keep as you had it)
+        pcall(function()
+            local fctrl = FighterController
+            if fctrl and fctrl.Objects then
+                for _, fighterObj in fctrl.Objects do
+                    if fighterObj.Player == targetPlayer and fighterObj.Entity then
+                        local item = fighterObj.EquippedItem
+                        if item and item.Info then
+                            item.Info.CanBackstab = true
+                            item.Info.BackstabOnly = false
+                            item.Info.BackstabAngle = 360
+                        end
+                        local entity = fighterObj.Entity
+                        if entity and entity.Data then
+                            entity.Data.CanBackstab = true
+                            entity.Data.BackstabAngle = 360
+                        end
+                        break
+                    end
+                end
+            end
+        end)
+
+        -- 2. Tight backstab position: almost on top of them, torso height
+        local targetRoot = targetChar:FindFirstChild("HumanoidRootPart") or targetRoot
+        if targetRoot then
+            -- ~0.5 stud behind, at torso height (not head, not far)
+            local victimBack = targetRoot.Position - (targetRoot.CFrame.LookVector * 0.5)
+            local backPos = Vector3.new(victimBack.X, targetRoot.Position.Y, victimBack.Z)
+
+            -- Aim at the torso so the swing scopes onto the body
+            local backAimCF = CFrame.lookAt(backPos, targetRoot.Position)
+
+            -- 3. Teleport
+            local oldCF = lplr.Character.HumanoidRootPart.CFrame
+            lplr.Character.HumanoidRootPart.CFrame = backAimCF
+
+            pcall(function()
+                game:GetService("RunService"):BindToRenderStep("__restore_melee", 101, function()
+                    if lplr.Character and lplr.Character.HumanoidRootPart then
+                        lplr.Character.HumanoidRootPart.CFrame = oldCF
+                    end
+                    pcall(function() game:GetService("RunService"):UnbindFromRenderStep("__restore_melee") end)
+                end)
+            end)
+
+            -- 4. Cam data targets the torso/root (NOT head)
+            local naturalCamData = {
+                [utf8.char(1)] = {
+                    [utf8.char(0)] = util:EncodeCFrame(backAimCF),
+                    [utf8.char(1)] = util:EncodeCFrame(targetRoot.CFrame),
+                    [utf8.char(2)] = targetRoot, -- torso/root, not Head
+                    [utf8.char(3)] = util:EncodeCFrame(CFrame.new(0,0,0)),
+                }
+            }
+
+            local heavy = enum:ToEnum("HeavyAttackAnimation1") or enum:ToEnum("HeavyAttack1")
+            local atk   = enum:ToEnum("AttackAnimation1")      or enum:ToEnum("Attack1")
+            local z1 = utf8.char(1)
+            local z2 = utf8.char(2)
+
+            -- 5. Aim + swing
+            pcall(function()
+                local lf = FighterController.LocalFighter
+                if lf and type(lf.Input) == "function" then
+                    lf:Input("StartAiming")
+                end
+            end)
+
+            for _ = 1, 15 do
+                pcall(function() remote:FireServer(objectId, enum:ToEnum("StartAiming"), {[z1] = naturalCamData[z1], [z2] = heavy}, nil) end)
+                pcall(function() remote:FireServer(objectId, shot, {[z1] = naturalCamData[z1], [z2] = atk}, nil) end)
+                pcall(function() remote:FireServer(objectId, shot, naturalCamData, nil) end)
+            end
+
+            setRageHud("ragebot: always-backstab @" .. targetPlayer.Name)
+        end
+    end
+end
