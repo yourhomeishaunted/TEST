@@ -1,0 +1,60 @@
+if slotName == "Melee" then
+						local targetChar = targetPlayer and targetPlayer.Character
+						if targetChar then
+							-- 1. Force the victim's backstab logic (Always Backstab)
+							local fctrl = FighterController
+							if fctrl and fctrl.Objects then
+								for _, fighterObj in fctrl.Objects do
+									if fighterObj.Player == targetPlayer and fighterObj.Entity then
+										pcall(function()
+											local entity = fighterObj.Entity
+											if entity and entity.Data then
+												entity.Data.CanBackstab = true
+												entity.Data.BackstabAngle = 360
+											end
+										end)
+										break
+									end
+								end
+							end
+
+							-- 2. Position in FRONT, but aim at the BACK of the head
+							local realHead = targetHead
+							if realHead then
+								-- Go 1 stud in FRONT of the head
+								local frontPos = realHead.Position + (realHead.CFrame.LookVector * 1) + Vector3.new(0, 0.2, 0)
+								
+								-- Look directly at the head
+								local headAimCF = CFrame.lookAt(frontPos, realHead.Position)
+								
+								local naturalCamData = {
+									[utf8.char(1)] = {
+										[utf8.char(0)] = util:EncodeCFrame(headAimCF),
+										[utf8.char(1)] = util:EncodeCFrame(realHead.CFrame),
+										[utf8.char(2)] = realHead,
+										[utf8.char(3)] = util:EncodeCFrame(CFrame.new(0,0,0)),
+									}
+								}
+
+								local heavy = enum:ToEnum("HeavyAttackAnimation1") or enum:ToEnum("HeavyAttack1")
+								local atk = enum:ToEnum("AttackAnimation1") or enum:ToEnum("Attack1")
+								local z1 = utf8.char(1)
+								local z2 = utf8.char(2)
+								
+								pcall(function()
+									local lf = FighterController.LocalFighter
+									if lf and type(lf.Input) == "function" then
+										lf:Input("StartAiming")
+									end
+								end)
+
+								for _ = 1, 15 do
+									pcall(function() remote:FireServer(objectId, enum:ToEnum("StartAiming"), {[z1] = naturalCamData[z1], [z2] = heavy}, nil) end)
+									pcall(function() remote:FireServer(objectId, shot, {[z1] = naturalCamData[z1], [z2] = atk}, nil) end)
+									pcall(function() remote:FireServer(objectId, shot, naturalCamData, nil) end)
+								end
+								
+								setRageHud("ragebot: front backstab @" .. targetPlayer.Name)
+							end
+						end
+					end
