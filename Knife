@@ -1,0 +1,266 @@
+repeat task.wait() until game:IsLoaded()
+local Players           = game:GetService("Players")
+local RunService        = game:GetService("RunService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local lplr              = Players.LocalPlayer
+local Util, Enums, FighterController
+pcall(function() Util              = require(ReplicatedStorage.Modules.Utility) end)
+pcall(function() Enums             = require(ReplicatedStorage.Modules.EnumLibrary) end)
+pcall(function() FighterController = require(lplr.PlayerScripts.Controllers.FighterController) end)
+if not Util or not Enums or not FighterController then
+    return warn("[Knife Rage] required modules missing")
+end
+local UseItem = ReplicatedStorage.Remotes.Replication.Fighter.UseItem
+local CFG = {
+    HeadBehindDist = 3.0,
+    HeadBehindYOff = 0.0,
+    DesyncJitter   = 0.35,
+    TargetFOV      = 250,
+    FireRate       = 1 / 60,
+    VoidY          = 50000000,
+    PreferRealIfBehind = true,
+    BehindDotThreshold = -0.3,
+    ForceFaceTarget = true,
+    FaceFlattenY    = true,
+}
+local function resolveEnum(candidates, fallback)
+    for _, name in ipairs(candidates) do
+        local ok, tok = pcall(function() return Enums:ToEnum(name) end)
+        if ok and tok ~= nil then
+            print(("[KR] enum OK: %s"):format(name))
+            return tok
+        end
+    end
+    warn(("[KR] enum fallback -> %s"):format(fallback))
+    return fallback
+end
+local startAiming = resolveEnum({ "StartAiming", "StartAim", "AimStart" }, "StartAiming")
+local currentDesyncCF = nil
+local restoreData     = {}
+local mode            = "void"
+local targetCache     = { player = nil, root = nil, head = nil, time = 0 }
+local CACHE_TTL       = 0.10
+local function sameTeam(p)
+    if not p or p == lplr then return true end
+    local a, b = lplr:GetAttribute("TeamID"), p:GetAttribute("TeamID")
+    if a and b then return a == b end
+    if lplr.Team and p.Team then return lplr.Team == p.Team end
+    return false
+end
+local function isEnemy(p) return p ~= lplr and not sameTeam(p) end
+local function isSane(v)  return v == v and math.abs(v.X) < 1e5 and math.abs(v.Y) < 1e5 and math.abs(v.Z) < 1e5 end
+local function cfFacing(pos, lookAtPos)
+    local dir
+    if CFG.FaceFlattenY then
+        dir = Vector3.new(lookAtPos.X - pos.X, 0, lookAtPos.Z - pos.Z)
+    else
+        dir = lookAtPos - pos
+    end
+    if dir.Magnitude < 1e-3 then
+        return CFrame.new(pos)
+    end
+    return CFrame.lookAt(pos, pos + dir.Unit)
+end
+local function getTarget()
+    local now = tick()
+    if now - targetCache.time < CACHE_TTL and targetCache.player then
+        local pc = targetCache.player.Character
+        if pc and pc:FindFirstChild("HumanoidRootPart") and pc:FindFirstChild("Head") then
+            local hum = pc:FindFirstChildWhichIsA("Humanoid")
+            if hum and hum.Health > 0 then
+                return targetCache.player, targetCache.root, targetCache.head
+            end
+        end
+    end
+    local myChar = lplr.Character
+    if not myChar then return nil end
+    local myRoot = myChar:FindFirstChild("HumanoidRootPart")
+    if not myRoot then return nil end
+    local best, bestRoot, bestHead, bestDist = nil, nil, nil, CFG.TargetFOV
+    for _, p in ipairs(Players:GetPlayers()) do
+        if isEnemy(p) then
+            local c = p.Character
+            if c then
+                local r = c:FindFirstChild("HumanoidRootPart")
+                local h = c:FindFirstChild("Head")
+                local hum = c:FindFirstChildWhichIsA("Humanoid")
+                if r and h and hum and hum.Health > 0 then
+                    local d = (myRoot.Position - r.Position).Magnitude
+                    if d < bestDist then bestDist = d; best = p; bestRoot = r; bestHead = h end
+                end
+            end
+        end
+    end
+    targetCache.player, targetCache.root, targetCache.head, targetCache.time = best, bestRoot, bestHead, now
+    return best, bestRoot, bestHead
+end
+local function computeFloatPoint(tRoot, tHead)
+    if not (tRoot and tHead) then return nil end
+    if not isSane(tRoot.Position) or not isSane(tHead.Position) then return nil end
+    local look = tRoot.CFrame.LookVector
+    local flatLook = Vector3.new(look.X, 0, look.Z)
+    if flatLook.Magnitude < 0.01 then flatLook = Vector3.new(0, 0, 1) end
+    flatLook = flatLook.Unit
+    local behind = tHead.Position
+        - flatLook * CFG.HeadBehindDist
+        + Vector3.new(0, CFG.HeadBehindYOff, 0)
+    if not isSane(behind) then return nil end
+    return behind, flatLook
+end
+local function backstabFeasible(tRoot, tHead, tgt)
+    local behind, flatLook = computeFloatPoint(tRoot, tHead)
+    if not behind then return false end
+    local toBehind = Vector3.new(behind.X - tHead.Position.X, 0, behind.Z - tHead.Position.Z)
+    if toBehind.Magnitude > 0.01 then
+        if toBehind.Unit:Dot(flatLook) > CFG.BehindDotThreshold then
+            return false
+        end
+    end
+    local rp = RaycastParams.new()
+    rp.FilterType = Enum.RaycastFilterType.Exclude
+    local ignore = { lplr.Character }
+    if tgt and tgt.Character then ignore[#ignore + 1] = tgt.Character end
+    rp.FilterDescendantsInstances = ignore
+    local hit = workspace:Raycast(behind, tHead.Position - behind, rp)
+    if hit and (hit.Position - tHead.Position).Magnitude > 3 then
+        return false, behind, flatLook
+    end
+    return true, behind, flatLook
+end
+local function realIsBehind(hrp, tRoot)
+    if not hrp or not tRoot then return false end
+    local look     = tRoot.CFrame.LookVector
+    local flatLook = Vector3.new(look.X, 0, look.Z)
+    local toMe     = hrp.Position - tRoot.Position
+    local flatMe   = Vector3.new(toMe.X, 0, toMe.Z)
+    if flatLook.Magnitude < 0.01 or flatMe.Magnitude < 0.1 then return false end
+    if flatMe.Magnitude > CFG.TargetFOV then return false end
+    local dot = flatMe.Unit:Dot(flatLook.Unit)
+    return dot <= CFG.BehindDotThreshold
+end
+RunService.RenderStepped:Connect(function()
+    local lf = FighterController.LocalFighter
+    if not lf then return end
+    local items = rawget(lf, "Items")
+    if type(items) ~= "table" then return end
+    local knife = items[3]
+    if knife and not rawget(knife, "IsEquipped") then
+        local cf = rawget(knife, "ClientFighter")
+        if cf and type(cf.EquipItem) == "function" then
+            pcall(function() cf:EquipItem(3) end)
+        end
+    end
+end)
+RunService:BindToRenderStep("KnifeRageRestore", Enum.RenderPriority.First.Value, function()
+    for _, d in ipairs(restoreData) do
+        if d.root and d.root.Parent then
+            d.root.CFrame      = d.oldCF
+            d.root.Velocity    = d.oldVel
+            d.root.RotVelocity = d.oldRotVel
+        end
+    end
+    restoreData = {}
+end)
+RunService.Heartbeat:Connect(function()
+    local tgt, tRoot, tHead = getTarget()
+    local destCF, canBackstab = nil, false
+    if tgt then
+        local ok, behind = backstabFeasible(tRoot, tHead, tgt)
+        if ok then
+            canBackstab = true
+            if CFG.ForceFaceTarget then
+                destCF = cfFacing(behind, tHead.Position)
+            else
+                destCF = CFrame.lookAt(behind, tHead.Position)
+            end
+        end
+    end
+    if not canBackstab then
+        local myChar = lplr.Character
+        local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
+        local pos = myRoot and myRoot.Position or Vector3.new(0, 0, 0)
+        destCF = CFrame.new(pos.X, CFG.VoidY, pos.Z)
+        mode = "void"
+    else
+        mode = "backstab"
+    end
+    currentDesyncCF = destCF
+    local ch  = lplr.Character
+    if not ch then return end
+    local hrp = ch:FindFirstChild("HumanoidRootPart")
+    if not hrp then return end
+    local oldCF, oldVel, oldRotVel = hrp.CFrame, hrp.Velocity, hrp.RotVelocity
+    if mode == "backstab" then
+        local jit = Vector3.new(
+            (math.random() - 0.5) * CFG.DesyncJitter,
+            (math.random() - 0.5) * CFG.DesyncJitter,
+            (math.random() - 0.5) * CFG.DesyncJitter)
+        local cf
+        if CFG.ForceFaceTarget then
+            cf = cfFacing(destCF.Position + jit, tHead.Position)
+        else
+            cf = destCF + jit
+        end
+        pcall(function() hrp.CFrame = cf end)
+    else
+        pcall(function() hrp.CFrame = destCF end)
+    end
+    hrp.Velocity    = oldVel
+    hrp.RotVelocity = oldRotVel
+    table.insert(restoreData, { root = hrp, oldCF = oldCF, oldVel = oldVel, oldRotVel = oldRotVel })
+end)
+task.spawn(function()
+    local lastLog, shots = 0, 0
+    while true do
+        task.wait(CFG.FireRate)
+        local tgt, tRoot, tHead = getTarget()
+        if not tgt or not tHead or not tRoot then continue end
+        local ch  = lplr.Character
+        local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
+        if not hrp then continue end
+        local attackerPos, usingReal = nil, false
+        if CFG.PreferRealIfBehind and realIsBehind(hrp, tRoot) then
+            attackerPos = hrp.Position
+            usingReal   = true
+        elseif mode == "backstab" and currentDesyncCF then
+            attackerPos = currentDesyncCF.Position
+        else
+            continue
+        end
+        local attackerCF
+        if CFG.ForceFaceTarget then
+            attackerCF = cfFacing(attackerPos, tHead.Position)
+        else
+            attackerCF = usingReal and hrp.CFrame or currentDesyncCF
+        end
+        local lf = FighterController.LocalFighter
+        if not lf then continue end
+        local item = lf.EquippedItem
+        if not item then continue end
+        local info = rawget(item, "Info")
+        local itype = info and rawget(info, "Type")
+        if itype ~= "Melee" then continue end
+        local targetCF   = tHead.CFrame
+        local headOffset = tHead.CFrame:ToObjectSpace(CFrame.new(tHead.Position))
+        local meleeData = {
+            [utf8.char(1)] = {
+                [utf8.char(0)] = Util:EncodeCFrame(attackerCF),
+                [utf8.char(1)] = Util:EncodeCFrame(targetCF),
+                [utf8.char(2)] = tHead,
+                [utf8.char(3)] = Util:EncodeCFrame(headOffset),
+            },
+            [utf8.char(2)] = startAiming,
+        }
+        local okId, objId = pcall(function() return item:Get("ObjectID") end)
+        if not okId or not objId then continue end
+        pcall(function() UseItem:FireServer(objId, startAiming, meleeData, nil) end)
+        shots = shots + 1
+        local now = tick()
+        if now - lastLog > 1 then
+            lastLog = now
+            print(("[KR] mode=%s  src=%s  facing=head  shots=%d")
+                :format(mode, usingReal and "real" or "float", shots))
+        end
+    end
+end)
+print("[Knife Rage] loaded — float 3 studs behind enemy HEAD (server pos faces target)")
